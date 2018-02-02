@@ -17,31 +17,46 @@ import (
 
 func main() {
 
+	var host string
 	var kubeconfig string
 	var master string
 	var pod string
 	var namespace string
 	var container string
 	var command string
+	var config *rest.Config
+	var err error
+	var wrappedRoundTripper http.RoundTripper
 
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "absolute path to the kubeconfig file")
 	flag.StringVar(&master, "master", "", "master url")
+	flag.StringVar(&host, "host", "http://127.0.0.1:8080", "kubernetes apiserver url")
 	flag.StringVar(&pod, "pod", "", "pod")
-	flag.StringVar(&namespace, "namespace", "", "namespace")
+	flag.StringVar(&namespace, "namespace", "default", "namespace")
 	flag.StringVar(&container, "container", "", "container")
 	flag.StringVar(&command, "command", "", "command")
 	flag.Parse()
 
-	// creates the connection
-	config, err := clientcmd.BuildConfigFromFlags(master, kubeconfig)
-	if err != nil {
-		glog.Fatal(err)
-	}
-
-	// Create a round tripper with all necessary kubernetes security details
-	wrappedRoundTripper, err := roundTripperFromConfig(config)
-	if err != nil {
-		log.Fatalln(err)
+	if host != "" {
+		config = &rest.Config{
+			Host: host,
+		}
+		// Create a round tripper with all necessary kubernetes security details
+		wrappedRoundTripper, err = roundTripperFromHost(config)
+		if err != nil {
+			log.Fatalln(err)
+		}
+	} else {
+		// creates the connection
+		config, err = clientcmd.BuildConfigFromFlags(master, kubeconfig)
+		if err != nil {
+			glog.Fatal(err)
+		}
+		// Create a round tripper with all necessary kubernetes security details
+		wrappedRoundTripper, err = roundTripperFromConfig(config)
+		if err != nil {
+			log.Fatalln(err)
+		}
 	}
 
 	// Create a request out of config and the query parameters
@@ -122,6 +137,22 @@ func roundTripperFromConfig(config *rest.Config) (http.RoundTripper, error) {
 	return rest.HTTPWrappersForConfig(config, rt)
 }
 
+func roundTripperFromHost(config *rest.Config) (http.RoundTripper, error) {
+	// Configure the websocket dialer
+	dialer := &websocket.Dialer{
+		Proxy: http.ProxyFromEnvironment,
+	}
+
+	// Create a roundtripper which will pass in the final underlying websocket connection to a callback
+	rt := &WebsocketRoundTripper{
+		Do:     WebsocketCallback,
+		Dialer: dialer,
+	}
+
+	// Make sure we inherit all relevant security headers
+	return rest.HTTPWrappersForConfig(config, rt)
+}
+
 func requestFromConfig(config *rest.Config, pod string, container string, namespace string, cmd string) (*http.Request, error) {
 
 	u, err := url.Parse(config.Host)
@@ -144,10 +175,12 @@ func requestFromConfig(config *rest.Config, pod string, container string, namesp
 			"&container=" + container +
 			"&stderr=true&stdout=true"
 	}
+
+	fmt.Printf("URL: %v?%v\n", u.Path, u.RawQuery)
+
 	req := &http.Request{
 		Method: http.MethodGet,
 		URL:    u,
 	}
-
 	return req, nil
 }
